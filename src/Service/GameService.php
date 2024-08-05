@@ -67,30 +67,59 @@ class GameService
     private function startPlayOff(Tournament $tournament)
     {
         $topTeams = $this->getTopTeamsForPlayoff($tournament);
-        $this->createGames($tournament, $topTeams, 'Playoff Game', GameType::PLAYOFF);
+        $this->createPlayoffGames($tournament, $topTeams);
     }
 
     private function createNextPlayoffGames(Tournament $tournament)
     {
-        $winners = $this->getPlayoffWinners($tournament);
+        $winners = $this->getPlayoffWinners($tournament, 'upper');
+        $losers = $this->getPlayoffWinners($tournament, 'lower');
 
         if (count($winners) <= 1) {
             return;
         }
 
-        $this->createGames($tournament, $winners, 'Playoff Game', GameType::PLAYOFF);
+        $this->createPlayoffGames($tournament, $winners, 'upper');
+
+        if (count($losers) > 1) {
+            $this->createPlayoffGames($tournament, $losers, 'lower');
+        }
     }
 
     private function getTopTeamsForPlayoff(Tournament $tournament): array
     {
-        return [];
+        $teamsA = $this->getTeamsWithScores($tournament, GameType::DIVISION_A);
+        $teamsB = $this->getTeamsWithScores($tournament, GameType::DIVISION_B);
+
+        usort($teamsA, fn($a, $b) => $b['score'] <=> $a['score']);
+        usort($teamsB, fn($a, $b) => $b['score'] <=> $a['score']);
+
+        $topTeamsA = array_slice($teamsA, 0, 4);
+        $topTeamsB = array_slice($teamsB, 0, 4);
+
+        return array_merge($topTeamsA, $topTeamsB);
     }
 
-    private function getPlayoffWinners(Tournament $tournament): array
+    private function getTeamsWithScores(Tournament $tournament, string $divisionType): array
+    {
+        return $this->entityManager->getRepository(Game::class)
+            ->createQueryBuilder('g')
+            ->select('g.teamOneId as teamId, SUM(g.teamOneScore) as score')
+            ->where('g.tournament = :tournament')
+            ->andWhere('g.type = :type')
+            ->setParameter('tournament', $tournament)
+            ->setParameter('type', $divisionType)
+            ->groupBy('g.teamOneId')
+            ->getQuery()
+            ->getResult();
+    }
+
+    private function getPlayoffWinners(Tournament $tournament, string $stage): array
     {
         $games = $this->entityManager->getRepository(Game::class)->findBy([
             'tournament' => $tournament,
             'type' => GameType::PLAYOFF,
+            'stage' => $stage,
             'finished' => true,
         ]);
 
@@ -106,26 +135,34 @@ class GameService
         return $winners;
     }
 
-    private function createGames(Tournament $tournament, array $teams, string $gameName, string $type)
+    private function createPlayoffGames(Tournament $tournament, array $teams, string $stage = 'upper')
     {
-        for ($i = 0; $i < count($teams); $i += 2) {
-            if (isset($teams[$i + 1])) {
-                $game = new Game();
-                $game->setName($gameName);
-                $game->setDate((new \DateTime())->format('Y-m-d H:i:s'));
-                $game->setTournament($tournament);
-                $game->setTeamOneId($teams[$i]);
-                $game->setTeamTwoId($teams[$i + 1]);
-                $game->setTeamOneScore(0);
-                $game->setTeamTwoScore(0);
-                $game->setType($type);
-                $game->setFinished(false);
+        usort($teams, fn($a, $b) => $a['score'] <=> $b['score']);
+        
+        $pairs = [
+            [$teams[0]['teamId'], $teams[7]['teamId']],
+            [$teams[1]['teamId'], $teams[6]['teamId']],
+            [$teams[2]['teamId'], $teams[5]['teamId']],
+            [$teams[3]['teamId'], $teams[4]['teamId']]
+        ];
 
-                $this->entityManager->persist($game);
+        foreach ($pairs as [$teamOneId, $teamTwoId]) {
+            $game = new Game();
+            $game->setName('Playoff Game');
+            $game->setDate((new \DateTime())->format('Y-m-d H:i:s'));
+            $game->setTournament($tournament);
+            $game->setTeamOneId($teamOneId);
+            $game->setTeamTwoId($teamTwoId);
+            $game->setTeamOneScore(0);
+            $game->setTeamTwoScore(0);
+            $game->setType(GameType::PLAYOFF);
+            $game->setStage($stage);
+            $game->setFinished(false);
 
-                $event = new GameUpdatedEvent($game);
-                $this->eventDispatcher->dispatch($event, GameUpdatedEvent::NAME);
-            }
+            $this->entityManager->persist($game);
+
+            $event = new GameUpdatedEvent($game);
+            $this->eventDispatcher->dispatch($event, GameUpdatedEvent::NAME);
         }
 
         $this->entityManager->flush();
